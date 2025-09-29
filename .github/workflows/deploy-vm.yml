@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       vm_name:
-        description: 'LINUX'
+        description: 'Nom de la VM'
         required: true
         default: 'myLinuxVM'
       resource_group:
@@ -55,14 +55,13 @@ jobs:
     
     - name: Display VM Info
       run: |
-        echo "VM créée avec succès!"
-        cat vm-output.json | jq -r '.publicIpAddress'
-        echo "IP publique: $(cat vm-output.json | jq -r '.publicIpAddress')"
-    
-    - name: Open SSH Port
-      run: |
-        az vm open-port \
-          --resource-group ${{ github.event.inputs.resource_group }} \
-          --name ${{ github.event.inputs.vm_name }} \
-          --port 22 \
-          --priority 1000
+        echo "✅ VM créée avec succès!"
+        echo "📍 Nom: ${{ github.event.inputs.vm_name }}"
+        echo "📦 Groupe de ressources: ${{ github.event.inputs.resource_group }}"
+        echo "🌍 Région: ${{ github.event.inputs.location }}"
+        echo "💻 Taille: Standard_B1s"
+        PUBLIC_IP=$(cat vm-output.json | jq -r '.publicIpAddress')
+        echo "🌐 IP publique: $PUBLIC_IP"
+        echo ""
+        echo "Pour vous connecter:"
+        echo "ssh azureuser@$PUBLIC_IP"
