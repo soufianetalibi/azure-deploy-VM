@@ -1,0 +1,68 @@
+name: Deploy Azure VM B1S
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_name:
+        description: 'LINUX'
+        required: true
+        default: 'myLinuxVM'
+      resource_group:
+        description: 'Nom du groupe de ressources'
+        required: true
+        default: 'myResourceGroup'
+      location:
+        description: 'Région Azure'
+        required: true
+        default: 'francecentral'
+        type: choice
+        options:
+          - francecentral
+          - francesouth
+          - westeurope
+          - northeurope
+
+jobs:
+  deploy-vm:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Create Resource Group
+      run: |
+        az group create \
+          --name ${{ github.event.inputs.resource_group }} \
+          --location ${{ github.event.inputs.location }}
+    
+    - name: Create VM B1S
+      run: |
+        az vm create \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }} \
+          --image Ubuntu2204 \
+          --size Standard_B1s \
+          --admin-username azureuser \
+          --generate-ssh-keys \
+          --public-ip-sku Standard \
+          --output json > vm-output.json
+    
+    - name: Display VM Info
+      run: |
+        echo "VM créée avec succès!"
+        cat vm-output.json | jq -r '.publicIpAddress'
+        echo "IP publique: $(cat vm-output.json | jq -r '.publicIpAddress')"
+    
+    - name: Open SSH Port
+      run: |
+        az vm open-port \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }} \
+          --port 22 \
+          --priority 1000
