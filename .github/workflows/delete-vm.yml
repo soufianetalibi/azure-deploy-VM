@@ -1,0 +1,132 @@
+name: Delete Azure VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_name:
+        description: 'Nom de la VM à supprimer'
+        required: true
+        default: 'myLinuxVM'
+      resource_group:
+        description: 'Nom du groupe de ressources'
+        required: true
+        default: 'myResourceGroup'
+      delete_resource_group:
+        description: 'Supprimer tout le groupe de ressources ?'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  delete-vm:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: List Resources Before Deletion
+      run: |
+        echo "?? Ressources actuelles dans le groupe '${{ github.event.inputs.resource_group }}':"
+        az resource list --resource-group ${{ github.event.inputs.resource_group }} --output table || echo "? Groupe de ressources introuvable"
+    
+    - name: Delete Entire Resource Group
+      if: ${{ github.event.inputs.delete_resource_group == 'true' }}
+      run: |
+        echo "??? Suppression du groupe de ressources complet: ${{ github.event.inputs.resource_group }}"
+        az group delete \
+          --name ${{ github.event.inputs.resource_group }} \
+          --yes \
+          --no-wait
+        echo "? Suppression du groupe de ressources lancée (mode asynchrone)"
+        echo "? La suppression complète peut prendre quelques minutes"
+    
+    - name: Delete Only VM and Related Resources
+      if: ${{ github.event.inputs.delete_resource_group == 'false' }}
+      run: |
+        echo "??? Suppression de la VM: ${{ github.event.inputs.vm_name }}"
+        
+        # Récupérer les informations de la VM
+        VM_INFO=$(az vm show --resource-group ${{ github.event.inputs.resource_group }} --name ${{ github.event.inputs.vm_name }} --output json 2>/dev/null || echo "{}")
+        
+        if [ "$VM_INFO" = "{}" ]; then
+          echo "? VM '${{ github.event.inputs.vm_name }}' introuvable"
+          exit 1
+        fi
+        
+        # Récupérer les ressources liées
+        NIC_ID=$(echo $VM_INFO | jq -r '.networkProfile.networkInterfaces[0].id // empty')
+        OS_DISK_NAME=$(echo $VM_INFO | jq -r '.storageProfile.osDisk.name // empty')
+        
+        echo "?? Ressources identifiées:"
+        echo "  - VM: ${{ github.event.inputs.vm_name }}"
+        echo "  - Disque OS: $OS_DISK_NAME"
+        echo "  - Interface réseau: $NIC_ID"
+        
+        # Supprimer la VM
+        echo "? Suppression de la VM..."
+        az vm delete \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }} \
+          --yes \
+          --no-wait
+        
+        sleep 10
+        
+        # Supprimer le disque OS
+        if [ -n "$OS_DISK_NAME" ]; then
+          echo "? Suppression du disque OS: $OS_DISK_NAME"
+          az disk delete \
+            --resource-group ${{ github.event.inputs.resource_group }} \
+            --name $OS_DISK_NAME \
+            --yes \
+            --no-wait || echo "?? Disque déjà supprimé ou introuvable"
+        fi
+        
+        # Supprimer l'interface réseau
+        if [ -n "$NIC_ID" ]; then
+          NIC_NAME=$(echo $NIC_ID | grep -oP '(?<=networkInterfaces/)[^/]+')
+          echo "? Suppression de l'interface réseau: $NIC_NAME"
+          
+          # Récupérer l'IP publique associée
+          PUBLIC_IP_ID=$(az network nic show --ids $NIC_ID --query 'ipConfigurations[0].publicIPAddress.id' -o tsv 2>/dev/null || echo "")
+          
+          az network nic delete \
+            --resource-group ${{ github.event.inputs.resource_group }} \
+            --name $NIC_NAME \
+            --no-wait || echo "?? Interface réseau déjà supprimée"
+          
+          # Supprimer l'IP publique
+          if [ -n "$PUBLIC_IP_ID" ]; then
+            PUBLIC_IP_NAME=$(echo $PUBLIC_IP_ID | grep -oP '(?<=publicIPAddresses/)[^/]+')
+            echo "? Suppression de l'IP publique: $PUBLIC_IP_NAME"
+            az network public-ip delete \
+              --resource-group ${{ github.event.inputs.resource_group }} \
+              --name $PUBLIC_IP_NAME \
+              --no-wait || echo "?? IP publique déjà supprimée"
+          fi
+        fi
+        
+        # Supprimer le NSG (Network Security Group)
+        NSG_NAME="${{ github.event.inputs.vm_name }}NSG"
+        echo "? Suppression du NSG: $NSG_NAME"
+        az network nsg delete \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name $NSG_NAME \
+          --no-wait 2>/dev/null || echo "?? NSG introuvable ou déjà supprimé"
+        
+        echo ""
+        echo "? Suppression lancée pour toutes les ressources liées à la VM"
+        echo "? La suppression complète peut prendre quelques minutes"
+    
+    - name: Verify Deletion
+      run: |
+        sleep 5
+        echo ""
+        echo "?? Ressources restantes dans le groupe '${{ github.event.inputs.resource_group }}':"
+        az resource list --resource-group ${{ github.event.inputs.resource_group }} --output table || echo "? Groupe de ressources vide ou supprimé"
