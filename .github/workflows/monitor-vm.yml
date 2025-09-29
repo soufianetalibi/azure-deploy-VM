@@ -1,0 +1,156 @@
+name: Monitor Azure VMs
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Vérification toutes les heures
+    - cron: '0 * * * *'
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Check All VMs Status
+      id: check
+      run: |
+        echo "?? Vérification de l'état de toutes les VMs..."
+        echo ""
+        
+        VMS=$(az vm list -d --output json)
+        
+        RUNNING=0
+        STOPPED=0
+        ISSUES=0
+        
+        echo "$VMS" | jq -c '.[]' | while read vm; do
+          NAME=$(echo $vm | jq -r '.name')
+          STATE=$(echo $vm | jq -r '.powerState')
+          RG=$(echo $vm | jq -r '.resourceGroup')
+          IP=$(echo $vm | jq -r '.publicIps // "N/A"')
+          
+          echo "VM: $NAME"
+          echo "  État: $STATE"
+          echo "  Groupe: $RG"
+          echo "  IP: $IP"
+          
+          if [[ "$STATE" == *"running"* ]]; then
+            ((RUNNING++))
+            echo "  ? En cours d'exécution"
+          elif [[ "$STATE" == *"stopped"* ]] || [[ "$STATE" == *"deallocated"* ]]; then
+            ((STOPPED++))
+            echo "  ?? Arrêtée"
+          else
+            ((ISSUES++))
+            echo "  ?? État inhabituel"
+          fi
+          echo ""
+        done
+        
+        echo "RUNNING=$RUNNING" >> $GITHUB_OUTPUT
+        echo "STOPPED=$STOPPED" >> $GITHUB_OUTPUT
+        echo "ISSUES=$ISSUES" >> $GITHUB_OUTPUT
+    
+    - name: Check VM Metrics
+      run: |
+        echo "?? Métriques des VMs en cours d'exécution..."
+        echo ""
+        
+        VMS=$(az vm list -d --query "[?powerState=='VM running']" --output json)
+        
+        echo "$VMS" | jq -c '.[]' | while read vm; do
+          NAME=$(echo $vm | jq -r '.name')
+          RG=$(echo $vm | jq -r '.resourceGroup')
+          
+          echo "?? Métriques pour: $NAME"
+          
+          # CPU moyen sur la dernière heure
+          CPU=$(az monitor metrics list \
+            --resource "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RG/providers/Microsoft.Compute/virtualMachines/$NAME" \
+            --metric "Percentage CPU" \
+            --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+            --aggregation Average \
+            --interval PT1H \
+            --query 'value[0].timeseries[0].data[-1].average' -o tsv 2>/dev/null || echo "N/A")
+          
+          if [ "$CPU" != "N/A" ]; then
+            CPU_INT=${CPU%.*}
+            echo "  ??? CPU: ${CPU_INT}%"
+            
+            if [ "$CPU_INT" -gt 80 ]; then
+              echo "  ?? ALERTE: CPU élevé!"
+            fi
+          else
+            echo "  ??? CPU: Données non disponibles"
+          fi
+          
+          echo ""
+        done
+    
+    - name: Check Monthly Costs
+      run: |
+        echo "?? Estimation des coûts mensuels..."
+        echo ""
+        
+        VMS=$(az vm list -d --output json)
+        TOTAL_COST=0
+        
+        echo "$VMS" | jq -c '.[]' | while read vm; do
+          NAME=$(echo $vm | jq -r '.name')
+          SIZE=$(echo $vm | jq -r '.hardwareProfile.vmSize')
+          STATE=$(echo $vm | jq -r '.powerState')
+          
+          # Estimation approximative des coûts
+          COST=0
+          case $SIZE in
+            Standard_B1s) COST=8 ;;
+            Standard_B1ms) COST=17 ;;
+            Standard_B2s) COST=35 ;;
+            Standard_B2ms) COST=70 ;;
+            Standard_B4ms) COST=140 ;;
+          esac
+          
+          if [[ "$STATE" == *"deallocated"* ]] || [[ "$STATE" == *"stopped"* ]]; then
+            COST=0
+          fi
+          
+          echo "VM: $NAME ($SIZE)"
+          echo "  État: $STATE"
+          echo "  Coût estimé: ${COST}€/mois"
+          echo ""
+        done
+    
+    - name: Generate Report
+      run: |
+        echo "?? RAPPORT DE MONITORING"
+        echo "========================"
+        echo ""
+        echo "?? Date: $(date)"
+        echo ""
+        echo "?? Résumé:"
+        echo "  ? VMs en cours: ${{ steps.check.outputs.RUNNING }}"
+        echo "  ?? VMs arrêtées: ${{ steps.check.outputs.STOPPED }}"
+        echo "  ?? VMs avec problèmes: ${{ steps.check.outputs.ISSUES }}"
+        echo ""
+        
+        if [ "${{ steps.check.outputs.ISSUES }}" -gt 0 ]; then
+          echo "?? ATTENTION: Des VMs nécessitent votre attention!"
+        else
+          echo "? Toutes les VMs fonctionnent normalement"
+        fi
+    
+    - name: Send Notification (Optional)
+      if: ${{ steps.check.outputs.ISSUES > 0 }}
+      run: |
+        echo "?? Des problèmes ont été détectés!"
+        echo "Vous pouvez configurer des notifications Discord/Slack/Email ici"
+        # Exemple avec webhook Discord:
+        # curl -H "Content-Type: application/json" \
+        #   -d '{"content":"?? Problèmes détectés sur vos VMs Azure!"}' \
+        #   ${{ secrets.DISCORD_WEBHOOK }}

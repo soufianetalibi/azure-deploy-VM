@@ -1,0 +1,115 @@
+name: Backup Azure VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_name:
+        description: 'Nom de la VM à sauvegarder'
+        required: true
+      resource_group:
+        description: 'Groupe de ressources'
+        required: true
+      snapshot_name:
+        description: 'Nom du snapshot (optionnel, auto si vide)'
+        required: false
+  schedule:
+    # Backup automatique tous les jours à 2h du matin
+    - cron: '0 2 * * *'
+
+jobs:
+  backup-vm:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Set Snapshot Name
+      id: snapshot
+      run: |
+        if [ -z "${{ github.event.inputs.snapshot_name }}" ]; then
+          SNAPSHOT_NAME="${{ github.event.inputs.vm_name }}-snapshot-$(date +%Y%m%d-%H%M%S)"
+        else
+          SNAPSHOT_NAME="${{ github.event.inputs.snapshot_name }}"
+        fi
+        echo "name=$SNAPSHOT_NAME" >> $GITHUB_OUTPUT
+        echo "?? Nom du snapshot: $SNAPSHOT_NAME"
+    
+    - name: Get VM Disk Info
+      id: disk
+      run: |
+        echo "?? Récupération des informations du disque..."
+        
+        DISK_ID=$(az vm show \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }} \
+          --query "storageProfile.osDisk.managedDisk.id" -o tsv)
+        
+        DISK_NAME=$(echo $DISK_ID | grep -oP '(?<=disks/)[^/]+')
+        
+        echo "disk_id=$DISK_ID" >> $GITHUB_OUTPUT
+        echo "disk_name=$DISK_NAME" >> $GITHUB_OUTPUT
+        echo "?? Disque trouvé: $DISK_NAME"
+    
+    - name: Create Snapshot
+      run: |
+        echo "?? Création du snapshot..."
+        
+        az snapshot create \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ steps.snapshot.outputs.name }} \
+          --source ${{ steps.disk.outputs.disk_id }} \
+          --output table
+        
+        echo "? Snapshot créé avec succès!"
+    
+    - name: List All Snapshots
+      run: |
+        echo ""
+        echo "?? Tous les snapshots pour la VM ${{ github.event.inputs.vm_name }}:"
+        az snapshot list \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --query "[?contains(name, '${{ github.event.inputs.vm_name }}')]" \
+          --output table
+    
+    - name: Cleanup Old Snapshots
+      run: |
+        echo ""
+        echo "?? Nettoyage des anciens snapshots (garde les 7 derniers)..."
+        
+        OLD_SNAPSHOTS=$(az snapshot list \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --query "[?contains(name, '${{ github.event.inputs.vm_name }}')].{name:name, created:timeCreated}" \
+          --output json | jq -r 'sort_by(.created) | reverse | .[7:] | .[].name')
+        
+        if [ -z "$OLD_SNAPSHOTS" ]; then
+          echo "? Aucun ancien snapshot à supprimer"
+        else
+          echo "Suppression des anciens snapshots:"
+          for snapshot in $OLD_SNAPSHOTS; do
+            echo "  ??? Suppression: $snapshot"
+            az snapshot delete \
+              --resource-group ${{ github.event.inputs.resource_group }} \
+              --name $snapshot \
+              --no-wait
+          done
+          echo "? Anciens snapshots supprimés"
+        fi
+    
+    - name: Calculate Storage Cost
+      run: |
+        echo ""
+        echo "?? Estimation des coûts de stockage:"
+        
+        TOTAL_SIZE=$(az snapshot list \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --query "[?contains(name, '${{ github.event.inputs.vm_name }}')].diskSizeGb" \
+          --output json | jq 'add')
+        
+        if [ -n "$TOTAL_SIZE" ] && [ "$TOTAL_SIZE" != "null" ]; then
+          COST=$(echo "scale=2; $TOTAL_SIZE * 0.05" | bc)
+          echo "?? Espace utilisé: ${TOTAL_SIZE}GB"
+          echo "?? Coût estimé: ~${COST}€/mois"
+        fi

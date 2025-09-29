@@ -1,0 +1,141 @@
+name: Manage Azure VMs
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action à effectuer'
+        required: true
+        type: choice
+        options:
+          - list
+          - start
+          - stop
+          - restart
+          - status
+          - resize
+      vm_name:
+        description: 'Nom de la VM (pour start/stop/restart/status/resize)'
+        required: false
+      resource_group:
+        description: 'Groupe de ressources (pour start/stop/restart/status/resize)'
+        required: false
+      new_size:
+        description: 'Nouvelle taille (pour resize, ex: Standard_B2s)'
+        required: false
+
+jobs:
+  manage-vm:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: List All VMs
+      if: ${{ github.event.inputs.action == 'list' }}
+      run: |
+        echo "?? Liste de toutes vos VMs Azure:"
+        echo ""
+        az vm list --output table --query "[].{Name:name, ResourceGroup:resourceGroup, Location:location, Size:hardwareProfile.vmSize, State:powerState}"
+        
+        echo ""
+        echo "?? Estimation des coûts mensuels par taille de VM:"
+        echo "  • Standard_B1s  : ~7-10€/mois"
+        echo "  • Standard_B2s  : ~30-40€/mois"
+        echo "  • Standard_B1ms : ~15-20€/mois"
+    
+    - name: Start VM
+      if: ${{ github.event.inputs.action == 'start' }}
+      run: |
+        echo "?? Démarrage de la VM: ${{ github.event.inputs.vm_name }}"
+        az vm start \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }}
+        echo "? VM démarrée avec succès!"
+        
+        PUBLIC_IP=$(az vm show -d \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }} \
+          --query publicIps -o tsv)
+        echo "?? IP publique: $PUBLIC_IP"
+    
+    - name: Stop VM
+      if: ${{ github.event.inputs.action == 'stop' }}
+      run: |
+        echo "?? Arrêt de la VM: ${{ github.event.inputs.vm_name }}"
+        az vm deallocate \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }}
+        echo "? VM arrêtée (deallocated) - Vous ne payez plus pour le compute!"
+    
+    - name: Restart VM
+      if: ${{ github.event.inputs.action == 'restart' }}
+      run: |
+        echo "?? Redémarrage de la VM: ${{ github.event.inputs.vm_name }}"
+        az vm restart \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }}
+        echo "? VM redémarrée avec succès!"
+    
+    - name: Get VM Status
+      if: ${{ github.event.inputs.action == 'status' }}
+      run: |
+        echo "?? Statut détaillé de la VM: ${{ github.event.inputs.vm_name }}"
+        echo ""
+        
+        VM_INFO=$(az vm show -d \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }} \
+          --output json)
+        
+        echo "Nom: $(echo $VM_INFO | jq -r '.name')"
+        echo "État: $(echo $VM_INFO | jq -r '.powerState')"
+        echo "Taille: $(echo $VM_INFO | jq -r '.hardwareProfile.vmSize')"
+        echo "OS: $(echo $VM_INFO | jq -r '.storageProfile.imageReference.offer') $(echo $VM_INFO | jq -r '.storageProfile.imageReference.sku')"
+        echo "Région: $(echo $VM_INFO | jq -r '.location')"
+        echo "IP publique: $(echo $VM_INFO | jq -r '.publicIps')"
+        echo "IP privée: $(echo $VM_INFO | jq -r '.privateIps')"
+        
+        echo ""
+        echo "?? Disques:"
+        az disk list \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --query "[?contains(name, '${{ github.event.inputs.vm_name }}')]" \
+          --output table
+    
+    - name: Resize VM
+      if: ${{ github.event.inputs.action == 'resize' }}
+      run: |
+        echo "?? Redimensionnement de la VM: ${{ github.event.inputs.vm_name }}"
+        echo "Nouvelle taille: ${{ github.event.inputs.new_size }}"
+        
+        # Vérifier si la taille est disponible
+        AVAILABLE=$(az vm list-sizes \
+          --location $(az vm show --resource-group ${{ github.event.inputs.resource_group }} --name ${{ github.event.inputs.vm_name }} --query location -o tsv) \
+          --query "[?name=='${{ github.event.inputs.new_size }}'].name" -o tsv)
+        
+        if [ -z "$AVAILABLE" ]; then
+          echo "? Taille non disponible dans cette région!"
+          exit 1
+        fi
+        
+        echo "? Arrêt de la VM..."
+        az vm deallocate \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }}
+        
+        echo "? Changement de taille..."
+        az vm resize \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }} \
+          --size ${{ github.event.inputs.new_size }}
+        
+        echo "? Redémarrage de la VM..."
+        az vm start \
+          --resource-group ${{ github.event.inputs.resource_group }} \
+          --name ${{ github.event.inputs.vm_name }}
+        
+        echo "? VM redimensionnée avec succès vers ${{ github.event.inputs.new_size }}!"
