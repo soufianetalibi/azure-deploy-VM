@@ -66,17 +66,15 @@ sur le dépôt / menu actions / executer le workflow "deploy-vm" ...
 
 ceci me permet de faire des déploiments des plusieurs services sur azure, sauvegarder les VMs, monitorer ...
 
-==backup
-
+===== le workflow backup-vm.yml
 Ce workflow est manuel, il sauvegarde les disques OS :
-
 pour toutes les VMs du Resource Group
-
-Le disque OS uniquement (pas les disques DATA)
- Sous forme de snapshots Azure
- Dans le même resource group
- Dans la même région
+ Le disque OS uniquement (pas les disques DATA)
+  Sous forme de snapshots Azure
+  placé dans le même resource group
+  Dans la même région
  
+
 
 
 
