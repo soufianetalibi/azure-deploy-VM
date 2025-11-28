@@ -4,16 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       vm_name:
-        description: 'Nom de la VM à sauvegarder'
+        description: 'Nom de la VM'
         required: true
       resource_group:
-        description: 'Groupe de ressources'
+        description: 'Resource Group exact'
         required: true
       snapshot_name:
-        description: 'Nom du snapshot (optionnel, auto si vide)'
+        description: 'Nom du snapshot (optionnel)'
         required: false
+
 jobs:
-  backup-vms:
+  backup-vm:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,50 +23,58 @@ jobs:
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    - name: Resolve Resource Group
-      id: rg
+    - name: Validate Resource Group
       run: |
-        RG="${{ github.event.inputs.resource_group || 'myResourceGroup' }}"
-        echo "rg=$RG" >> $GITHUB_OUTPUT
-        echo "✅ Resource Group: $RG"
+        if ! az group show --name "${{ github.event.inputs.resource_group }}" > /dev/null 2>&1; then
+          echo "❌ ERREUR : Resource group introuvable : ${{ github.event.inputs.resource_group }}"
+          exit 1
+        fi
+        echo "✅ Resource group trouvé"
 
-    - name: List VMs
-      id: vms
+    - name: Validate VM existence
       run: |
-        VM_LIST=$(az vm list \
-          --resource-group ${{ steps.rg.outputs.rg }} \
-          --query "[].name" -o tsv)
+        if ! az vm show \
+          --resource-group "${{ github.event.inputs.resource_group }}" \
+          --name "${{ github.event.inputs.vm_name }}" > /dev/null 2>&1; then
 
-        if [ -z "$VM_LIST" ]; then
-          echo "❌ Aucune VM dans le resource group"
+          echo "❌ ERREUR : VM '${{ github.event.inputs.vm_name }}' introuvable dans le groupe '${{ github.event.inputs.resource_group }}'"
+          exit 1
+        fi
+        echo "✅ VM trouvée : ${{ github.event.inputs.vm_name }}"
+
+    - name: Resolve Snapshot Name
+      id: snap
+      run: |
+        if [ -z "${{ github.event.inputs.snapshot_name }}" ]; then
+          NAME="${{ github.event.inputs.vm_name }}-snapshot-$(date +%Y%m%d-%H%M%S)"
+        else
+          NAME="${{ github.event.inputs.snapshot_name }}"
+        fi
+        echo "name=$NAME" >> $GITHUB_OUTPUT
+        echo "✅ Nom du snapshot : $NAME"
+
+    - name: Get OS Disk
+      id: disk
+      run: |
+        DISK_ID=$(az vm show \
+          --resource-group "${{ github.event.inputs.resource_group }}" \
+          --name "${{ github.event.inputs.vm_name }}" \
+          --query "storageProfile.osDisk.managedDisk.id" -o tsv)
+
+        if [ -z "$DISK_ID" ]; then
+          echo "❌ ERREUR : disque OS introuvable"
           exit 1
         fi
 
-        echo "✅ VMs trouvées:"
-        echo "$VM_LIST"
+        echo "disk_id=$DISK_ID" >> $GITHUB_OUTPUT
+        echo "✅ Disque OS trouvé : $(basename "$DISK_ID")"
 
-        echo "list=$VM_LIST" >> $GITHUB_OUTPUT
-
-    - name: Backup all VMs
+    - name: Create Snapshot
       run: |
-        set -e
+        az snapshot create \
+          --resource-group "${{ github.event.inputs.resource_group }}" \
+          --name "${{ steps.snap.outputs.name }}" \
+          --source "${{ steps.disk.outputs.disk_id }}" \
+          --output table
 
-        for VM in ${{ steps.vms.outputs.list }}; do
-          echo "======================================"
-          echo "📀 Sauvegarde de la VM: $VM"
-
-          DISK_ID=$(az vm show \
-            --resource-group ${{ steps.rg.outputs.rg }} \
-            --name $VM \
-            --query "storageProfile.osDisk.managedDisk.id" -o tsv)
-
-          SNAP_NAME="$VM-snapshot-$(date +%Y%m%d-%H%M%S)"
-
-          az snapshot create \
-            --resource-group ${{ steps.rg.outputs.rg }} \
-            --name "$SNAP_NAME" \
-            --source "$DISK_ID" \
-            --output table
-
-          echo "✅ Snapshot créé: $SNAP_NAME"
-        done
+        echo "✅ Snapshot créé avec succès"
