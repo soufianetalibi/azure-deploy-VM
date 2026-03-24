@@ -1,5 +1,7 @@
 ﻿# azure-deploy-VM
 
+ Ici, le workflow .yml sur github contient des commandes azure CLI, il se connecte sur azure avec un SP et execute des commandes CLI pour créer des ressources sur azure
+
 git remote add origin https://github.com/soufianetalibi/azure-deploy-VM.git
 
 git add .
